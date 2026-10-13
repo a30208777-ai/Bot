@@ -128,7 +128,10 @@ class Bot(discord.Client):
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
-        await self.tree.sync()
+        try:
+            await self.tree.sync()
+        except discord.HTTPException as e:
+            print(f"⚠️ Não consegui registrar os comandos (/add, /remover): {e}")
 
 
 client = Bot()
@@ -197,12 +200,16 @@ async def salvar_lista(guild: discord.Guild):
         return False
     msg = mensagem_lista.get(guild.id)
     try:
-        if msg:
-            await msg.edit(content=texto)
-        else:
+        try:
+            if msg:
+                await msg.edit(content=texto)
+            else:
+                mensagem_lista[guild.id] = await canal.send(texto)
+        except discord.NotFound:
             mensagem_lista[guild.id] = await canal.send(texto)
-    except discord.HTTPException:
-        mensagem_lista[guild.id] = await canal.send(texto)
+    except discord.HTTPException as e:
+        print(f"⚠️ Não consegui salvar a lista no canal {canal.name}: {e}")
+        return False
     return True
 
 
@@ -254,11 +261,23 @@ async def lista(interaction: discord.Interaction):
     await interaction.response.send_message(f"📋 {texto}"[:1900], ephemeral=True)
 
 
+async def enviar(canal, texto: str):
+    try:
+        await canal.send(texto)
+    except discord.Forbidden:
+        print(f"⚠️ Sem acesso ao canal #{canal.name}: dê ao bot Ver Canal e Enviar Mensagens nele.")
+    except discord.HTTPException as e:
+        print(f"⚠️ Erro ao enviar em #{canal.name}: {e}")
+
+
 # ---------------- eventos ----------------
 @client.event
 async def on_ready():
     for g in client.guilds:
-        await carregar_lista(g)
+        try:
+            await carregar_lista(g)
+        except discord.Forbidden:
+            print("⚠️ Sem acesso ao canal de log (dê ao bot: Ver Canal + Ler Histórico + Enviar Mensagens).")
     print(f"✅ Bot online como {client.user}")
 
 
@@ -310,13 +329,13 @@ async def on_message(msg: discord.Message):
         status = "✅ aplicado" if sucesso else "⚠️ falhou (sem permissão)"
         if banido:
             status += " • 🔨 banido"
-        await canal_log.send(f"`{linha}`\n{status} • {datetime.now():%d/%m/%Y %H:%M:%S}"[:1990])
+        await enviar(canal_log, f"`{linha}`\n{status} • {datetime.now():%d/%m/%Y %H:%M:%S}"[:1990])
     else:
         print(f"⚠️ Canal de log não encontrado. Log: {linha}")
 
     # 3) aviso em #briga e #🤬brigas
     for canal in achar_canais_brigas(msg.guild):
-        await canal.send(f"{canal.mention} agora {membro.mention}")
+        await enviar(canal, f"{canal.mention} agora {membro.mention}")
 
 
 # ============ Servidor web mínimo (para o Render) ============
@@ -343,4 +362,4 @@ threading.Thread(target=manter_vivo, daemon=True).start()
 # ==============================================================
 
 client.run(TOKEN)
-          
+              
