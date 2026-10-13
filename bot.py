@@ -25,7 +25,11 @@ import discord
 from discord import app_commands
 
 # ================== CONFIGURAÇÃO ==================
-TOKEN = os.getenv("DISCORD_TOKEN", "COLOQUE_SEU_TOKEN_AQUI")
+TOKEN = os.getenv("DISCORD_TOKEN", "").strip().strip("\"'")
+if len(TOKEN) < 50:
+    print("❌ DISCORD_TOKEN vazio ou errado. No Render: Environment > DISCORD_TOKEN = "
+          "token do bot (Portal do Discord > Bot > Redefinir token). "
+          "Não é o ID do aplicativo nem a chave pública.")
 
 # Canais onde o bot avisa (nome só precisa CONTER o texto)
 TRECHOS_CANAIS_BRIGAS = ["briga"]
@@ -288,12 +292,23 @@ async def on_message(msg: discord.Message):
 
     membro = msg.author
 
-    # moderadores/gerentes são imunes (qualquer cargo conta)
-    if eh_imune(membro):
-        return
-
     if not tem_briga(msg.content):
         return
+
+    # moderadores/gerentes são imunes (qualquer cargo conta)
+    if eh_imune(membro):
+        print(f"ℹ️ {membro} falou algo proibido, mas é imune (cargo de moderação).")
+        return
+
+    # 0) apaga a mensagem
+    apagada = False
+    try:
+        await msg.delete()
+        apagada = True
+    except discord.Forbidden:
+        print("⚠️ Não consegui apagar a mensagem: dê ao bot a permissão Gerenciar Mensagens.")
+    except discord.HTTPException as e:
+        print(f"⚠️ Erro ao apagar a mensagem: {e}")
 
     # 1) timeout
     try:
@@ -329,6 +344,7 @@ async def on_message(msg: discord.Message):
         status = "✅ aplicado" if sucesso else "⚠️ falhou (sem permissão)"
         if banido:
             status += " • 🔨 banido"
+        status += " • 🗑️ msg apagada" if apagada else " • ⚠️ msg não apagada"
         await enviar(canal_log, f"`{linha}`\n{status} • {datetime.now():%d/%m/%Y %H:%M:%S}"[:1990])
     else:
         print(f"⚠️ Canal de log não encontrado. Log: {linha}")
@@ -362,4 +378,3 @@ threading.Thread(target=manter_vivo, daemon=True).start()
 # ==============================================================
 
 client.run(TOKEN)
-              
