@@ -48,6 +48,25 @@ CARGOS_IMUNES_EXATOS = {"mod", "mods", "adm"}   # só valem como palavra inteira
 # Ex.: 3 = bane no 3º castigo (a contagem zera se o Render reiniciar).
 BANIR_APOS = 0
 
+# Só estes usuários do Discord (nome de usuário único, sem @) usam os comandos
+# /add /remover /lista /ban /unban /verbans
+DONOS_COMANDOS = {
+    "arthurdevpromax",
+    "frezennew_ofc",
+    "pedrotvzin72_25",
+    "vinicius3774235",
+    "felpzsouls",
+}
+
+# Banidos AUTOMATICAMENTE assim que entrarem no servidor.
+# Pode ser o nome de usuário (sem @) ou o ID numérico (o ID é mais seguro,
+# porque o nome de usuário pode ser trocado).
+BANIR_AO_ENTRAR = {"iamantientrosa", "warlenking0005"}
+MOTIVO_BAN_ENTRADA = (
+    "Raid: vocês fizeram raids com seu bot, que é proibido. "
+    "Vocês não são bem-vindos nesse servidor nunca mais."
+)
+
 NOME_CANAL_LOG = "log"       # canal cujo nome contém "log"
 DURACAO_MINUTOS = 10
 MOTIVO = "não seguir o que estava sendo mandado e xingar no servidor"
@@ -166,6 +185,7 @@ def achar_canais_brigas(guild: discord.Guild):
 
 infracoes = {}  # user_id -> quantidade de CASTIGOS (zera ao reiniciar)
 avisos = {}      # user_id -> quantos avisos já levou (zera ao reiniciar)
+historico = {}   # user_id -> últimas falas proibidas (usadas no motivo do /ban)
 
 
 def eh_imune(membro: discord.Member) -> bool:
@@ -229,8 +249,12 @@ async def salvar_lista(guild: discord.Guild):
 
 # ---------------- comandos ----------------
 def pode_gerenciar(interaction: discord.Interaction) -> bool:
-    p = interaction.user.guild_permissions
-    return p.administrator or p.moderate_members
+    """Só quem está em DONOS_COMANDOS (compara o nome de usuário, que é único)."""
+    donos = {normalizar(n) for n in DONOS_COMANDOS}
+    return normalizar(interaction.user.name) in donos
+
+
+NEGADO = "❌ Você não tem permissão para usar este comando."
 
 
 @client.tree.command(name="add", description="Adiciona uma palavra ou sigla proibida")
@@ -238,7 +262,7 @@ def pode_gerenciar(interaction: discord.Interaction) -> bool:
 @app_commands.guild_only()
 async def add(interaction: discord.Interaction, palavra: str):
     if not pode_gerenciar(interaction):
-        return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+        return await interaction.response.send_message(NEGADO, ephemeral=True)
     p = normalizar(palavra)
     if len(p) < 3:
         return await interaction.response.send_message(
@@ -256,7 +280,7 @@ async def add(interaction: discord.Interaction, palavra: str):
 @app_commands.guild_only()
 async def remover(interaction: discord.Interaction, palavra: str):
     if not pode_gerenciar(interaction):
-        return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+        return await interaction.response.send_message(NEGADO, ephemeral=True)
     p = normalizar(palavra)
     if p not in palavras:
         return await interaction.response.send_message("⚠️ Essa não está na lista.", ephemeral=True)
@@ -270,9 +294,112 @@ async def remover(interaction: discord.Interaction, palavra: str):
 @app_commands.guild_only()
 async def lista(interaction: discord.Interaction):
     if not pode_gerenciar(interaction):
-        return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+        return await interaction.response.send_message(NEGADO, ephemeral=True)
     texto = ", ".join(sorted(palavras)) or "(vazia)"
     await interaction.response.send_message(f"📋 {texto}"[:1900], ephemeral=True)
+
+
+@client.tree.command(name="list", description="Mostra as palavras proibidas (igual a /lista)")
+@app_commands.guild_only()
+async def list_(interaction: discord.Interaction):
+    await lista.callback(interaction)
+
+
+@client.tree.command(name="remove", description="Remove uma palavra da lista (igual a /remover)")
+@app_commands.describe(palavra="Palavra ou sigla para remover")
+@app_commands.guild_only()
+async def remove(interaction: discord.Interaction, palavra: str):
+    await remover.callback(interaction, palavra)
+
+
+@client.tree.command(name="ban", description="Bane um usuário do servidor")
+@app_commands.describe(
+    user="Quem banir (escolha na lista ou cole o ID)",
+    motivo="Motivo. Se vazio: 'fala indevida de' + todas as falas registradas",
+)
+@app_commands.guild_only()
+async def ban(interaction: discord.Interaction, user: discord.User, motivo: str = None):
+    if not pode_gerenciar(interaction):
+        return await interaction.response.send_message(NEGADO, ephemeral=True)
+    if user.id in (interaction.user.id, client.user.id):
+        return await interaction.response.send_message("❌ Escolha outra pessoa.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+
+    falas = historico.get(user.id, [])
+    if not motivo:
+        motivo = "fala indevida" + (" de: " + " | ".join(falas) if falas else "")
+    motivo = motivo[:500]   # o Discord aceita até 512 caracteres
+
+    try:
+        await interaction.guild.ban(user, reason=motivo)
+    except discord.Forbidden:
+        return await interaction.followup.send(
+            "❌ Não consegui banir. O bot precisa da permissão **Banir Membros** "
+            "e do cargo acima do cargo da pessoa.", ephemeral=True)
+    except discord.HTTPException as e:
+        return await interaction.followup.send(f"❌ Erro ao banir: {e}", ephemeral=True)
+
+    for d in (historico, avisos, infracoes):
+        d.pop(user.id, None)
+    canal_log = achar_canal_log(interaction.guild)
+    if canal_log:
+        await enviar(canal_log, f"`/ban user:{user.name} motivo:{motivo}`\n"
+                                f"🔨 banido por {interaction.user.name} • "
+                                f"{datetime.now():%d/%m/%Y %H:%M:%S}"[:1990])
+    await interaction.followup.send(f"🔨 Banido: **{user.name}**\nMotivo: {motivo}", ephemeral=True)
+
+
+@client.tree.command(name="unban", description="Desbane um usuário")
+@app_commands.describe(user="Quem desbanir (escolha na lista ou cole o ID)")
+@app_commands.guild_only()
+async def unban(interaction: discord.Interaction, user: discord.User):
+    if not pode_gerenciar(interaction):
+        return await interaction.response.send_message(NEGADO, ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    try:
+        await interaction.guild.unban(user, reason=f"unban por {interaction.user.name}")
+    except discord.NotFound:
+        return await interaction.followup.send("⚠️ Essa pessoa não está banida.", ephemeral=True)
+    except discord.Forbidden:
+        return await interaction.followup.send(
+            "❌ Não consegui desbanir. O bot precisa da permissão **Banir Membros**.", ephemeral=True)
+    except discord.HTTPException as e:
+        return await interaction.followup.send(f"❌ Erro ao desbanir: {e}", ephemeral=True)
+
+    canal_log = achar_canal_log(interaction.guild)
+    if canal_log:
+        await enviar(canal_log, f"`/unban user:{user.name}`\n"
+                                f"✅ desbanido por {interaction.user.name} • "
+                                f"{datetime.now():%d/%m/%Y %H:%M:%S}"[:1990])
+    await interaction.followup.send(f"✅ Desbanido: **{user.name}**", ephemeral=True)
+
+
+@client.tree.command(name="verbans", description="Mostra quem está banido e o motivo")
+@app_commands.guild_only()
+async def verbans(interaction: discord.Interaction):
+    if not pode_gerenciar(interaction):
+        return await interaction.response.send_message(NEGADO, ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    linhas = []
+    try:
+        async for e in interaction.guild.bans(limit=200):
+            linhas.append(f"• **{e.user.name}** ({e.user.id}) — {e.reason or 'sem motivo'}")
+    except discord.Forbidden:
+        return await interaction.followup.send(
+            "❌ O bot precisa da permissão **Banir Membros** para ver a lista.", ephemeral=True)
+    if not linhas:
+        return await interaction.followup.send("✅ Ninguém está banido.", ephemeral=True)
+
+    pedacos, atual = [], f"🔨 {len(linhas)} banido(s):\n"
+    for l in linhas:
+        l = l[:400]
+        if len(atual) + len(l) + 1 > 1900:
+            pedacos.append(atual)
+            atual = ""
+        atual += l + "\n"
+    pedacos.append(atual)
+    for parte in pedacos[:6]:
+        await interaction.followup.send(parte, ephemeral=True)
 
 
 async def enviar(canal, texto: str):
@@ -296,6 +423,32 @@ async def on_ready():
 
 
 @client.event
+async def on_member_join(membro: discord.Member):
+    alvos = {normalizar(n) for n in BANIR_AO_ENTRAR}
+    if normalizar(membro.name) not in alvos and str(membro.id) not in alvos:
+        return
+
+    try:                                   # tenta avisar por mensagem privada
+        await membro.send(f"⛔ {MOTIVO_BAN_ENTRADA}")
+    except (discord.Forbidden, discord.HTTPException):
+        pass                               # DM fechada: segue o baile
+
+    try:
+        await membro.guild.ban(membro, reason=MOTIVO_BAN_ENTRADA[:500])
+        banido = True
+    except (discord.Forbidden, discord.HTTPException) as e:
+        banido = False
+        print(f"⚠️ Não consegui banir {membro.name} ao entrar: {e}")
+
+    canal_log = achar_canal_log(membro.guild)
+    if canal_log:
+        status = ("🔨 banido automaticamente ao entrar" if banido
+                  else "⚠️ falhou (o bot precisa de Banir Membros e cargo acima)")
+        await enviar(canal_log, f"`/ban user:{membro.name} motivo:{MOTIVO_BAN_ENTRADA}`\n"
+                                f"{status} • {datetime.now():%d/%m/%Y %H:%M:%S}"[:1990])
+
+
+@client.event
 async def on_message(msg: discord.Message):
     if msg.author.bot or msg.guild is None:
         return
@@ -315,6 +468,11 @@ async def on_message(msg: discord.Message):
     if eh_imune(membro):
         print(f"ℹ️ {membro} falou algo proibido, mas é imune (cargo de moderação).")
         return
+
+    # guarda a fala (vira o motivo do /ban)
+    falas = historico.setdefault(membro.id, [])
+    falas.append(msg.content[:80])
+    del falas[:-15]
 
     # apaga a mensagem
     apagada = False
@@ -443,4 +601,3 @@ threading.Thread(target=auto_ping, daemon=True).start()
 # ==============================================================
 
 client.run(TOKEN)
-      
