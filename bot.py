@@ -337,6 +337,9 @@ async def on_message(msg: discord.Message):
         n += 1
         avisos[membro.id] = n
         await enviar(msg.channel, f"{mencoes} agora {membro.mention} (aviso {n}/{LIMITE_AVISOS})")
+        for c in canais_brigas:   # e também dentro dos canais de briga
+            await enviar(c, f"{c.mention} agora {membro.mention} "
+                            f"(xingou em {msg.channel.mention} • aviso {n}/{LIMITE_AVISOS})")
         linha = f"/aviso user:{membro.name} aviso:{n}/{LIMITE_AVISOS} fala:({msg.content})"
         if canal_log:
             await enviar(canal_log, f"`{linha}`\n⚠️ só avisou • {status_msg} • {agora}"[:1990])
@@ -365,6 +368,9 @@ async def on_message(msg: discord.Message):
             msg.channel,
             f"{membro.mention} levou {DURACAO_MINUTOS} minutos de castigo por {MOTIVO}.",
         )
+        for c in canais_brigas:
+            await enviar(c, f"{membro.mention} levou {DURACAO_MINUTOS} minutos de castigo "
+                            f"por {MOTIVO} (em {msg.channel.mention}).")
 
     # banimento por reincidência (se BANIR_APOS > 0)
     banido = False
@@ -437,4 +443,4 @@ threading.Thread(target=auto_ping, daemon=True).start()
 # ==============================================================
 
 client.run(TOKEN)
-               
+      
