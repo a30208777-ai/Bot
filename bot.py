@@ -2,7 +2,8 @@
 Bot anti-briga - Blackzin YT server
 
 Funções:
-  - Detecta brigas (palavras, siglas e ofensas com "gay") só em quem tem o cargo alvo
+  - Detecta brigas (palavras, siglas, ofensas e palavras cortadas com "-") em TODOS os membros,
+    menos quem tem cargo de moderador/gerente (ou permissões de moderação)
   - Aplica timeout, manda o log no canal "log" e avisa em #briga / #🤬brigas
   - Comandos: /add palavra, /remover palavra, /lista
   - A lista de palavras fica salva numa mensagem do canal de log
@@ -24,18 +25,25 @@ import discord
 from discord import app_commands
 
 # ================== CONFIGURAÇÃO ==================
-TOKEN = os.getenv("DISCORD_TOKEN", "MTU1OTQyODUxNjk5MzU3Mjg4NA.G3QZXi.WqnZR11kQrwWh8R3p5yg1U_SnYcJ9QuobPjKVU")
+TOKEN = os.getenv("DISCORD_TOKEN", "COLOQUE_SEU_TOKEN_AQUI")
 
 # Canais onde o bot avisa (nome só precisa CONTER o texto)
 TRECHOS_CANAIS_BRIGAS = ["briga"]
 
-# Só quem tem esse cargo é punido (ignora acento e maiúsculas)
-CARGO_ALVO = "FĀ BLACKZIN |"
+# IMUNIDADE: o bot olha TODOS os cargos de quem falou. Se qualquer um deles
+# tiver um destes trechos no nome (ignora acento/maiúscula), a pessoa é imune.
+CARGOS_IMUNES = ["moderador", "moderadora", "gerente"]
+CARGOS_IMUNES_EXATOS = {"mod", "mods", "adm"}   # só valem como palavra inteira
+# Também é imune quem tem algum cargo com permissão de moderação
+# (administrador, gerenciar servidor, banir, expulsar, silenciar, apagar mensagens).
+
+# Banimento: 0 = nunca bane (só castiga com timeout).
+# Ex.: 3 = bane na 3ª infração (a contagem zera se o Render reiniciar).
+BANIR_APOS = 0
 
 NOME_CANAL_LOG = "log"       # canal cujo nome contém "log"
 DURACAO_MINUTOS = 10
 MOTIVO = "falou algo errado"
-IGNORAR_ADMINS = True        # não pune administradores
 
 # Lista inicial. Depois use /add e /remover no Discord.
 # Regra: palavra sem espaço com até 4 letras (siglas como vsf, fdp)
@@ -140,9 +148,26 @@ def achar_canais_brigas(guild: discord.Guild):
     ]
 
 
-def tem_cargo_alvo(membro: discord.Member) -> bool:
-    alvo = normalizar(CARGO_ALVO).strip(" |")
-    return any(alvo in normalizar(r.name) for r in membro.roles)
+infracoes = {}  # user_id -> quantidade de infrações (zera ao reiniciar)
+
+
+def eh_imune(membro: discord.Member) -> bool:
+    """Imune = dono, ou qualquer cargo de moderador/gerente/com permissão de moderação."""
+    if membro.id == membro.guild.owner_id:
+        return True
+    for r in membro.roles:                      # olha TODOS os cargos
+        if r.is_default():
+            continue
+        perm = r.permissions
+        if (perm.administrator or perm.manage_guild or perm.ban_members
+                or perm.kick_members or perm.moderate_members or perm.manage_messages):
+            return True
+        nome = normalizar(r.name)
+        if any(t in nome for t in CARGOS_IMUNES):
+            return True
+        if CARGOS_IMUNES_EXATOS & set(re.findall(r"[a-z0-9]+", nome)):
+            return True
+    return False
 
 
 # ---------------- lista salva no canal de log ----------------
@@ -244,10 +269,8 @@ async def on_message(msg: discord.Message):
 
     membro = msg.author
 
-    # só pune quem tem o cargo alvo
-    if not tem_cargo_alvo(membro):
-        return
-    if IGNORAR_ADMINS and membro.guild_permissions.administrator:
+    # moderadores/gerentes são imunes (qualquer cargo conta)
+    if eh_imune(membro):
         return
 
     if not tem_briga(msg.content):
@@ -267,6 +290,16 @@ async def on_message(msg: discord.Message):
         sucesso = False
         print(f"⚠️ Erro ao aplicar timeout: {e}")
 
+    # 1b) banimento por reincidência (se BANIR_APOS > 0)
+    banido = False
+    infracoes[membro.id] = infracoes.get(membro.id, 0) + 1
+    if BANIR_APOS and infracoes[membro.id] >= BANIR_APOS:
+        try:
+            await membro.ban(reason=f"{MOTIVO} ({infracoes[membro.id]} infrações)")
+            banido = True
+        except (discord.Forbidden, discord.HTTPException) as e:
+            print(f"⚠️ Não consegui banir: {e}")
+
     # 2) log no canal de log
     linha = (
         f"/timeout user:{membro.name} duration:{DURACAO_MINUTOS} "
@@ -275,6 +308,8 @@ async def on_message(msg: discord.Message):
     canal_log = achar_canal_log(msg.guild)
     if canal_log:
         status = "✅ aplicado" if sucesso else "⚠️ falhou (sem permissão)"
+        if banido:
+            status += " • 🔨 banido"
         await canal_log.send(f"`{linha}`\n{status} • {datetime.now():%d/%m/%Y %H:%M:%S}"[:1990])
     else:
         print(f"⚠️ Canal de log não encontrado. Log: {linha}")
@@ -308,3 +343,4 @@ threading.Thread(target=manter_vivo, daemon=True).start()
 # ==============================================================
 
 client.run(TOKEN)
+          
