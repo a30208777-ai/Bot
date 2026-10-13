@@ -4,7 +4,8 @@ Bot anti-briga - Blackzin YT server
 Funções:
   - Detecta brigas (palavras, siglas, ofensas e palavras cortadas com "-") em TODOS os membros,
     menos quem tem cargo de moderador/gerente (ou permissões de moderação)
-  - Aplica timeout, manda o log no canal "log" e avisa em #briga / #🤬brigas
+  - Apaga a mensagem e pede para a pessoa ir para #briga / #🤬brigas (até 4 avisos);
+    no 5º xingamento aplica timeout de 10 min e manda o log no canal "log"
   - Comandos: /add palavra, /remover palavra, /lista
   - A lista de palavras fica salva numa mensagem do canal de log
     (NÃO apague essa mensagem, senão a lista volta ao padrão)
@@ -17,6 +18,8 @@ import json
 import os
 import re
 import threading
+import time
+import urllib.request
 import unicodedata
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -42,12 +45,18 @@ CARGOS_IMUNES_EXATOS = {"mod", "mods", "adm"}   # só valem como palavra inteira
 # (administrador, gerenciar servidor, banir, expulsar, silenciar, apagar mensagens).
 
 # Banimento: 0 = nunca bane (só castiga com timeout).
-# Ex.: 3 = bane na 3ª infração (a contagem zera se o Render reiniciar).
+# Ex.: 3 = bane no 3º castigo (a contagem zera se o Render reiniciar).
 BANIR_APOS = 0
 
 NOME_CANAL_LOG = "log"       # canal cujo nome contém "log"
 DURACAO_MINUTOS = 10
-MOTIVO = "falou algo errado"
+MOTIVO = "não seguir o que estava sendo mandado e xingar no servidor"
+
+# Quantas vezes o bot PEDE para a pessoa ir para o canal de briga antes de castigar.
+# Aviso 1, 2, 3 e 4 = só pede (e apaga a mensagem). No 5º xingamento = castigo.
+LIMITE_AVISOS = 4
+# Xingar DENTRO de #briga / #🤬brigas não conta (é pra lá que a pessoa é mandada).
+PERMITIR_NOS_CANAIS_BRIGA = True
 
 # Lista inicial. Depois use /add e /remover no Discord.
 # Regra: palavra sem espaço com até 4 letras (siglas como vsf, fdp)
@@ -155,7 +164,8 @@ def achar_canais_brigas(guild: discord.Guild):
     ]
 
 
-infracoes = {}  # user_id -> quantidade de infrações (zera ao reiniciar)
+infracoes = {}  # user_id -> quantidade de CASTIGOS (zera ao reiniciar)
+avisos = {}      # user_id -> quantos avisos já levou (zera ao reiniciar)
 
 
 def eh_imune(membro: discord.Member) -> bool:
@@ -295,12 +305,18 @@ async def on_message(msg: discord.Message):
     if not tem_briga(msg.content):
         return
 
+    canais_brigas = achar_canais_brigas(msg.guild)
+
+    # xingar dentro dos canais de briga é permitido
+    if PERMITIR_NOS_CANAIS_BRIGA and msg.channel in canais_brigas:
+        return
+
     # moderadores/gerentes são imunes (qualquer cargo conta)
     if eh_imune(membro):
         print(f"ℹ️ {membro} falou algo proibido, mas é imune (cargo de moderação).")
         return
 
-    # 0) apaga a mensagem
+    # apaga a mensagem
     apagada = False
     try:
         await msg.delete()
@@ -310,7 +326,27 @@ async def on_message(msg: discord.Message):
     except discord.HTTPException as e:
         print(f"⚠️ Erro ao apagar a mensagem: {e}")
 
-    # 1) timeout
+    mencoes = " ou ".join(c.mention for c in canais_brigas) or "#brigas"
+    canal_log = achar_canal_log(msg.guild)
+    agora = f"{datetime.now():%d/%m/%Y %H:%M:%S}"
+    status_msg = "🗑️ msg apagada" if apagada else "⚠️ msg não apagada"
+
+    # ---------- AVISO: ainda dentro do limite ----------
+    n = avisos.get(membro.id, 0)
+    if n < LIMITE_AVISOS:
+        n += 1
+        avisos[membro.id] = n
+        await enviar(msg.channel, f"{mencoes} agora {membro.mention} (aviso {n}/{LIMITE_AVISOS})")
+        linha = f"/aviso user:{membro.name} aviso:{n}/{LIMITE_AVISOS} fala:({msg.content})"
+        if canal_log:
+            await enviar(canal_log, f"`{linha}`\n⚠️ só avisou • {status_msg} • {agora}"[:1990])
+        else:
+            print(f"⚠️ Canal de log não encontrado. Log: {linha}")
+        return
+
+    # ---------- CASTIGO: passou do limite de avisos ----------
+    avisos[membro.id] = 0   # recomeça a contagem depois do castigo
+
     try:
         await membro.timeout(
             timedelta(minutes=DURACAO_MINUTOS),
@@ -324,34 +360,33 @@ async def on_message(msg: discord.Message):
         sucesso = False
         print(f"⚠️ Erro ao aplicar timeout: {e}")
 
-    # 1b) banimento por reincidência (se BANIR_APOS > 0)
+    if sucesso:
+        await enviar(
+            msg.channel,
+            f"{membro.mention} levou {DURACAO_MINUTOS} minutos de castigo por {MOTIVO}.",
+        )
+
+    # banimento por reincidência (se BANIR_APOS > 0)
     banido = False
     infracoes[membro.id] = infracoes.get(membro.id, 0) + 1
     if BANIR_APOS and infracoes[membro.id] >= BANIR_APOS:
         try:
-            await membro.ban(reason=f"{MOTIVO} ({infracoes[membro.id]} infrações)")
+            await membro.ban(reason=f"{MOTIVO} ({infracoes[membro.id]} castigos)")
             banido = True
         except (discord.Forbidden, discord.HTTPException) as e:
             print(f"⚠️ Não consegui banir: {e}")
 
-    # 2) log no canal de log
     linha = (
         f"/timeout user:{membro.name} duration:{DURACAO_MINUTOS} "
         f"reason:{MOTIVO} fala:({msg.content})"
     )
-    canal_log = achar_canal_log(msg.guild)
     if canal_log:
         status = "✅ aplicado" if sucesso else "⚠️ falhou (sem permissão)"
         if banido:
             status += " • 🔨 banido"
-        status += " • 🗑️ msg apagada" if apagada else " • ⚠️ msg não apagada"
-        await enviar(canal_log, f"`{linha}`\n{status} • {datetime.now():%d/%m/%Y %H:%M:%S}"[:1990])
+        await enviar(canal_log, f"`{linha}`\n{status} • {status_msg} • {agora}"[:1990])
     else:
         print(f"⚠️ Canal de log não encontrado. Log: {linha}")
-
-    # 3) aviso em #briga e #🤬brigas
-    for canal in achar_canais_brigas(msg.guild):
-        await enviar(canal, f"{canal.mention} agora {membro.mention}")
 
 
 # ============ Servidor web mínimo (para o Render) ============
@@ -375,6 +410,31 @@ def manter_vivo():
 
 
 threading.Thread(target=manter_vivo, daemon=True).start()
+
+
+# ---- Auto-ping: o bot "entra e sai" da própria URL a cada 15 segundos ----
+# O Render coloca a URL pública do serviço em RENDER_EXTERNAL_URL.
+PING_URL = os.getenv("RENDER_EXTERNAL_URL", "https://bot-1-efe3.onrender.com/")
+PING_INTERVALO = 15   # segundos
+
+
+def auto_ping():
+    falhou = False
+    while True:
+        time.sleep(PING_INTERVALO)
+        try:
+            urllib.request.urlopen(PING_URL, timeout=10).read()
+            if falhou:
+                print("✅ Auto-ping voltou a funcionar")
+                falhou = False
+        except Exception as e:
+            if not falhou:               # avisa só na 1ª falha, sem encher o log
+                print(f"⚠️ Auto-ping falhou: {e}")
+                falhou = True
+
+
+threading.Thread(target=auto_ping, daemon=True).start()
 # ==============================================================
 
 client.run(TOKEN)
+               
